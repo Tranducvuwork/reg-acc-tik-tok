@@ -1,0 +1,11 @@
+# Môi trường Python
+.venv/
+__pycache__/
+*.pyc
+
+# File tạm / kết quả chạy
+.tmp/
+logs/
+accounts.txt
+chrome-mac/
+chrome-mac-arm64/
