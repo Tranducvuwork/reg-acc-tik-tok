@@ -7,6 +7,7 @@ __pycache__/
 .tmp/
 logs/
 accounts.txt
+accounts_android.jsonl
 data/outlook_accounts.txt
 data/.outlook_tokens/
 chrome-mac/

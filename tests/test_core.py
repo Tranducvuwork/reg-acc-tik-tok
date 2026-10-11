@@ -1,12 +1,15 @@
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 from regtiktok_multithread import (
     TiktokRegWorker,
+    connect_adb_device,
     format_account_record,
     generate_totp,
+    open_tiktok_android,
     parse_args,
     parse_proxy,
+    read_adb_device_context,
 )
 
 
@@ -61,9 +64,64 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(args.qr_policy, 'wait')
 
     def test_qr_wait_policy_can_be_selected(self):
-        args = parse_args(['--qr-policy', 'wait', '--retries', '4'])
+        args = parse_args([
+            '--qr-policy', 'wait', '--retries', '4',
+            '--adb-device', '192.168.1.41:42977', '--adb-required',
+        ])
         self.assertEqual(args.qr_policy, 'wait')
         self.assertEqual(args.retries, 4)
+        self.assertEqual(args.adb_device, '192.168.1.41:42977')
+        self.assertTrue(args.adb_required)
+
+    @patch('regtiktok_multithread.list_adb_devices')
+    @patch('regtiktok_multithread.subprocess.run')
+    def test_adb_tcp_connect_confirms_exact_device(self, run, list_devices):
+        list_devices.return_value = {'192.168.1.41:42977': 'device'}
+        self.assertTrue(connect_adb_device('192.168.1.41:42977'))
+        run.assert_called_once_with(
+            ['adb', 'connect', '192.168.1.41:42977'],
+            capture_output=True, text=True, timeout=20, check=False,
+        )
+
+    def test_adb_tcp_connect_rejects_invalid_endpoint(self):
+        with self.assertRaises(ValueError):
+            connect_adb_device('192.168.1.999:37027')
+
+    @patch('regtiktok_multithread.subprocess.run')
+    def test_adb_context_is_read_only(self, run):
+        run.side_effect = [
+            MagicMock(returncode=0, stdout='vi-VN\n'),
+            MagicMock(returncode=0, stdout='Asia/Ho_Chi_Minh\n'),
+            MagicMock(returncode=0, stdout='3\n'),
+        ]
+
+        context = read_adb_device_context('192.168.1.41:42977')
+
+        self.assertEqual(context, {
+            'locale': 'vi-VN',
+            'timezone': 'Asia/Ho_Chi_Minh',
+            'location_mode': '3',
+        })
+        commands = [call.args[0] for call in run.call_args_list]
+        self.assertEqual(commands, [
+            ['adb', '-s', '192.168.1.41:42977', 'shell', 'getprop', 'persist.sys.locale'],
+            ['adb', '-s', '192.168.1.41:42977', 'shell', 'getprop', 'persist.sys.timezone'],
+            ['adb', '-s', '192.168.1.41:42977', 'shell', 'settings', 'get', 'secure', 'location_mode'],
+        ])
+
+    @patch('regtiktok_multithread.subprocess.run')
+    def test_open_tiktok_android_uses_official_launcher(self, run):
+        run.side_effect = [
+            MagicMock(returncode=0, stdout='', stderr=''),
+            MagicMock(returncode=0, stdout='Events injected: 1', stderr=''),
+        ]
+
+        self.assertTrue(open_tiktok_android('192.168.1.41:42977'))
+        self.assertEqual(run.call_args_list[1].args[0], [
+            'adb', '-s', '192.168.1.41:42977', 'shell', 'monkey',
+            '-p', 'com.ss.android.ugc.trill',
+            '-c', 'android.intent.category.LAUNCHER', '1',
+        ])
 
     @patch('regtiktok_multithread.time.sleep', return_value=None)
     def test_post_signup_rejection_is_detected_without_login_fallback(self, _sleep):

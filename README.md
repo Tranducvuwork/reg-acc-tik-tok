@@ -96,6 +96,48 @@ Chạy đúng một tài khoản, một luồng:
 python regtiktok_multithread.py --threads 1 --accounts 1 --email ban@gmail.com
 ```
 
+Kết nối thiết bị Android đã ghép đôi qua ADB TCP và bắt buộc thiết bị phải online:
+
+```bash
+python regtiktok_multithread.py --adb-device 192.168.1.41:42977 --adb-required --check
+python regtiktok_multithread.py --adb-device 192.168.1.41:42977 --adb-required --threads 1 --accounts 1 --email ban@gmail.com
+```
+
+Chỉ mở TikTok trực tiếp trên điện thoại để kiểm tra kết nối:
+
+```bash
+python regtiktok_multithread.py --adb-device 192.168.1.41:42977 --open-android
+```
+
+Chạy flow native trực tiếp trong app TikTok trên Android (không dùng Chrome/Selenium):
+
+```bash
+chmod +x run_android.sh
+./run_android.sh --device 192.168.1.41:42977
+```
+
+Chạy toàn bộ flow Android với email tạm và tự lấy OTP:
+
+```bash
+./run_android.sh --device 192.168.1.41:42977 --temp-mail
+```
+
+Hoặc dùng email của bạn và nhập OTP trong Terminal:
+
+```bash
+./run_android.sh --device 192.168.1.41:42977 --email you@example.com
+```
+
+Flow native chỉ bấm các nút được nhận diện bằng text, không bấm theo tọa độ cố
+định. Ngày sinh, OTP, CAPTCHA và checkpoint được hoàn tất thủ công trên điện
+thoại. Dùng `python3 app.py --device SERIAL --inspect` để xem nội dung UI mà ADB
+đang nhận diện.
+
+Tool chỉ đọc locale, múi giờ và trạng thái dịch vụ vị trí để báo cáo; không thay
+đổi, giả lập hoặc đồng bộ các cài đặt này. Kết nối mạng/proxy 4G vẫn do chính
+điện thoại hoặc router quản lý. Khi TikTok yêu cầu xác minh bắt buộc, tool mở
+deep-link trong ứng dụng và chờ bạn xác nhận thay vì né bước bảo mật.
+
 Với `--email`, bạn có thể dùng Gmail hoặc bất kỳ hộp thư nào mình sở hữu.
 Khi TikTok gửi mã 6 số, công cụ sẽ yêu cầu nhập OTP trực tiếp trong Terminal;
 không cần Microsoft Client ID.

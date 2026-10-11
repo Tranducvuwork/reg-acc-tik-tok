@@ -161,6 +161,77 @@ outlook_lock = threading.Lock()
 outlook_accounts_queue = queue.Queue()
 
 
+ADB_TCP_SERIAL_RE = re.compile(
+    r'^(?P<host>(?:\d{1,3}\.){3}\d{1,3}|[A-Za-z0-9.-]+):(?P<port>\d{1,5})$'
+)
+
+
+def list_adb_devices() -> Dict[str, str]:
+    """Trả về serial -> trạng thái từ `adb devices`, không thay đổi thiết bị."""
+    result = subprocess.run(
+        ['adb', 'devices'], capture_output=True, text=True, timeout=10, check=True
+    )
+    devices = {}
+    for line in result.stdout.splitlines()[1:]:
+        parts = line.split()
+        if len(parts) >= 2:
+            devices[parts[0]] = parts[1]
+    return devices
+
+
+def connect_adb_device(serial: str) -> bool:
+    """Kết nối một endpoint ADB TCP cụ thể và xác nhận thiết bị ở trạng thái online."""
+    match = ADB_TCP_SERIAL_RE.fullmatch((serial or '').strip())
+    if not match:
+        raise ValueError("ADB device phải có dạng host:port")
+    port = int(match.group('port'))
+    octets = match.group('host').split('.')
+    if not 1 <= port <= 65535 or (
+        len(octets) == 4 and all(part.isdigit() for part in octets)
+        and any(int(part) > 255 for part in octets)
+    ):
+        raise ValueError("Địa chỉ hoặc cổng ADB không hợp lệ")
+    subprocess.run(
+        ['adb', 'connect', serial], capture_output=True, text=True, timeout=20, check=False
+    )
+    return list_adb_devices().get(serial) == 'device'
+
+
+def read_adb_device_context(serial: str) -> Dict[str, str]:
+    """Chỉ đọc locale/múi giờ/vị trí; không ghi hay giả lập các cài đặt này."""
+    commands = {
+        'locale': ['shell', 'getprop', 'persist.sys.locale'],
+        'timezone': ['shell', 'getprop', 'persist.sys.timezone'],
+        'location_mode': ['shell', 'settings', 'get', 'secure', 'location_mode'],
+    }
+    context = {}
+    for name, args in commands.items():
+        result = subprocess.run(
+            ['adb', '-s', serial, *args], capture_output=True, text=True,
+            timeout=10, check=False,
+        )
+        context[name] = result.stdout.strip() if result.returncode == 0 else 'unknown'
+    return context
+
+
+def open_tiktok_android(serial: str) -> bool:
+    """Đánh thức thiết bị và mở ứng dụng TikTok chính thức, không tự thao tác tài khoản."""
+    subprocess.run(
+        ['adb', '-s', serial, 'shell', 'input', 'keyevent', 'KEYCODE_WAKEUP'],
+        capture_output=True, text=True, timeout=10, check=False,
+    )
+    result = subprocess.run(
+        [
+            'adb', '-s', serial, 'shell', 'monkey',
+            '-p', 'com.ss.android.ugc.trill',
+            '-c', 'android.intent.category.LAUNCHER', '1',
+        ],
+        capture_output=True, text=True, timeout=20, check=False,
+    )
+    output = f"{result.stdout}\n{result.stderr}"
+    return result.returncode == 0 and 'Events injected: 1' in output
+
+
 def load_outlook_accounts():
     """Đọc email Outlook có sẵn: email|Microsoft application client_id."""
     if not os.path.exists(OUTLOOK_ACCOUNTS_FILE):
@@ -975,14 +1046,12 @@ class TiktokRegWorker:
         """Tìm thiết bị ADB online, ưu tiên serial TCP/IP."""
         configured = CONFIG.get('ADB_DEVICE', '').strip()
         try:
-            result = subprocess.run(
-                ['adb', 'devices'], capture_output=True, text=True, timeout=10, check=True
-            )
-            devices = []
-            for line in result.stdout.splitlines()[1:]:
-                parts = line.split()
-                if len(parts) >= 2 and parts[1] == 'device':
-                    devices.append(parts[0])
+            if configured and ADB_TCP_SERIAL_RE.fullmatch(configured):
+                connect_adb_device(configured)
+            devices = [
+                serial for serial, state in list_adb_devices().items()
+                if state == 'device'
+            ]
             if configured:
                 return configured if configured in devices else None
             return next((serial for serial in devices if re.match(r'^\d+\.\d+\.\d+\.\d+:\d+$', serial)), devices[0] if devices else None)
@@ -2687,6 +2756,18 @@ def parse_args(argv=None):
         help='Chỉ kiểm tra cấu hình, không mở trình duyệt hoặc đăng ký',
     )
     parser.add_argument(
+        '--adb-device', default=CONFIG['ADB_DEVICE'], metavar='HOST:PORT',
+        help='Thiết bị Android ADB TCP dùng để mở TikTok (mặc định: %(default)s)',
+    )
+    parser.add_argument(
+        '--adb-required', action='store_true',
+        help='Dừng trước khi mở trình duyệt nếu thiết bị ADB không online',
+    )
+    parser.add_argument(
+        '--open-android', action='store_true',
+        help='Kết nối ADB, mở ứng dụng TikTok trên điện thoại rồi thoát',
+    )
+    parser.add_argument(
         '--retries', type=int,
         help='Số lần thử cho mỗi tài khoản (mặc định: email tạm 3, email khác 3)',
     )
@@ -2696,6 +2777,8 @@ def parse_args(argv=None):
 def preflight_check(
     manual_email: Optional[str] = None,
     use_temp_mail: bool = False,
+    adb_device: Optional[str] = None,
+    adb_required: bool = False,
 ) -> bool:
     """Kiểm tra các điều kiện bắt buộc trước khi mở Chrome."""
     issues = []
@@ -2710,6 +2793,26 @@ def preflight_check(
         )
     if not chrome_path:
         issues.append("Không tìm thấy Google Chrome/Chromium trên máy")
+    if adb_device:
+        try:
+            adb_online = connect_adb_device(adb_device)
+            if adb_online:
+                context = read_adb_device_context(adb_device)
+                logger.info(
+                    "ADB online %s; giữ nguyên locale=%s, timezone=%s, location_mode=%s",
+                    adb_device, context['locale'] or 'mặc định hệ thống',
+                    context['timezone'] or 'mặc định hệ thống',
+                    context['location_mode'] or 'không xác định',
+                )
+            elif adb_required:
+                issues.append(f"Thiết bị ADB {adb_device} không online")
+            else:
+                logger.warning("Thiết bị ADB %s không online; QR sẽ xử lý thủ công", adb_device)
+        except (FileNotFoundError, subprocess.SubprocessError, ValueError) as exc:
+            if adb_required:
+                issues.append(f"Không kết nối được ADB {adb_device}: {exc}")
+            else:
+                logger.warning("Không kết nối được ADB %s: %s", adb_device, exc)
     if issues:
         for issue in issues:
             logger.error(f"Kiểm tra cấu hình: {issue}")
@@ -2747,7 +2850,33 @@ def main(argv=None):
     if not os.path.exists('logs'):
         os.makedirs('logs')
 
-    if not preflight_check(args.email, args.temp_mail):
+    CONFIG['ADB_DEVICE'] = (args.adb_device or '').strip()
+    if args.open_android:
+        if not CONFIG['ADB_DEVICE']:
+            logger.error("Cần truyền --adb-device HOST:PORT để mở TikTok trên Android.")
+            return 2
+        try:
+            if not connect_adb_device(CONFIG['ADB_DEVICE']):
+                logger.error("Thiết bị ADB %s không online.", CONFIG['ADB_DEVICE'])
+                return 2
+            context = read_adb_device_context(CONFIG['ADB_DEVICE'])
+            logger.info(
+                "Giữ nguyên locale=%s, timezone=%s, location_mode=%s",
+                context['locale'] or 'mặc định hệ thống',
+                context['timezone'] or 'mặc định hệ thống',
+                context['location_mode'] or 'không xác định',
+            )
+            if not open_tiktok_android(CONFIG['ADB_DEVICE']):
+                logger.error("Không mở được TikTok; hãy kiểm tra ứng dụng com.ss.android.ugc.trill.")
+                return 2
+            logger.info("Đã mở TikTok trên thiết bị %s.", CONFIG['ADB_DEVICE'])
+            return 0
+        except (FileNotFoundError, subprocess.SubprocessError, ValueError) as exc:
+            logger.error("Không thể mở TikTok qua ADB: %s", exc)
+            return 2
+    if not preflight_check(
+        args.email, args.temp_mail, CONFIG['ADB_DEVICE'], args.adb_required
+    ):
         logger.error("Chưa đủ cấu hình để tạo tài khoản. Không có thay đổi nào được gửi lên TikTok.")
         return 2
     if args.check:
