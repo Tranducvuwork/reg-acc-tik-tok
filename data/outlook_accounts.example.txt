@@ -1,0 +1,5 @@
+# Mỗi dòng là một hộp thư Microsoft bạn sở hữu và Client ID của app đã đăng ký.
+# Không đặt mật khẩu, refresh token hoặc mã 2FA trong file này.
+#
+# Định dạng:
+# email@outlook.com|MICROSOFT_APPLICATION_CLIENT_ID
